@@ -1,0 +1,282 @@
+---
+title: "Mapping the UNK_9.698_1251.79456_minus phenoptype with subsetting"
+author: "Jared Noel"
+date: "`r Sys.Date()`"
+format: 
+  html:
+      embed-resources: true
+      standalone: true
+include-in-header:
+  - text: |
+      <style>
+      .panel-tabset > .nav-tabs,
+      .panel-tabset > .tab-content {
+        border: none;
+      }
+      </style>
+code-fold: true
+toc: true
+toc-depth: 5
+toc-expand: true
+editor: 
+  markdown: 
+    wrap: sentence
+---
+# Mapping the lipid UNK_9.698_1251.79456_minus with subsetting
+
+## Setup
+```{r}
+#| label: Setup
+#| message: false
+
+library(tidyverse)
+library(ggbeeswarm)
+library(knitr)
+library(qtl2)
+library(AnnotationHub)
+library(DESeq2)
+library(qvalue)
+library(sva)
+library(rtracklayer)
+library(tibble)
+
+# this is a function to make nicer tables than knitr
+create_dt <- function(x){
+  # x <- x |> mutate_if(is.numeric, round, 2)
+  DT::datatable(x,
+                extensions = 'Buttons',
+                rownames = FALSE, 
+                filter="top",
+                options = list(dom = 'Blfrtip',
+                               buttons = c('copy', 'csv', 'excel'),
+                               pageLength = 5, 
+                               scrollX= TRUE
+                               ))
+
+}
+
+set.seed(55555)
+```
+
+## Load and subset data
+Here, we load the liver lipid phenotype data and subset the rankZ normalized UNK_9.698_1251.79456_minus data. We also read in the peaks from the full dataset genome scan.
+```{r}
+#| label: Load and Subset Data
+
+# read in the data
+LiverLipids_Phenotypes_V11 <- readRDS("_data/LiverLipids_Phenotypes_V11.rds")
+load("../data/rdata/attie.core.GRCm39.v1.Rdata")
+full_data_peaks <- readRDS("_data/full_dataset_peaks.rds")
+
+#subset rank Z data column
+rz_data <- LiverLipids_Phenotypes_V11[[4]][[3]]
+rz_sing_data <- as.data.frame(rz_data[, "UNK_9.698_1251.79456_minus", drop=FALSE])
+saveRDS(rz_sing_data, file = "_data/rz_sing_data.rds")
+```
+
+## Set subset sizes
+The dataset contains 384 samples. We need to subset it to contain smaller sample sizes so we can do the power analysis.
+```{r}
+#| cache: true
+#| label: Subset sizes
+
+subset_sizes <- c(350, 300, 250, 200, 150, 100, 50)
+```
+
+## Build initial covariate matrix
+This is the additive covariate matrix that contains the covariates for all 384 mice. In the main loop, we will subset this full matrix to only contain the rows corresponding to the samples in the smaller subset.
+```{r}
+#| cache: true
+#| label: Covariates
+
+samp_annot <- LiverLipids_Phenotypes_V11[[2]] #subset the covariate info from the annotation data
+
+# make the covariates factors
+samp_annot$Sex <- factor(samp_annot$Sex)
+samp_annot$Wave <- factor(samp_annot$Wave)
+samp_annot$Batch <- factor(samp_annot$Batch)
+
+# build the covariate matrix
+addcovar <- model.matrix(~Sex + Wave + Batch, data = samp_annot)[, -1, drop=FALSE]
+
+# addocovar only includes rows which don't have NA values. Filter these out so the rows of       addcovar match with the rows in the rz_sing_data and store the mouse ids
+mouse_ids <- samp_annot$MouseID[!is.na(samp_annot$Batch)]
+  
+# replace the rownames of addcovar with the mouse ids
+rownames(addcovar) <- mouse_ids
+```
+
+## Main loop
+This chunk contains all the code that has to be repeated for each sample size. We randomly subset the data into the appropriate number of samples, then subset the covariate matrix to match these samples. Then, we perform the genome scan and permutations to identify significant peaks and calculate the BLUPs. All of this data is stored in the results list, indexed by the sample size, and this process is repeated for each sample size in subset_sizes. 
+```{r}
+#| cache: true
+#| label: Genome scan
+
+results <- list()
+
+for (n in subset_sizes) {
+  #subset the data
+  subset_rz_data <- slice_sample(rz_sing_data, n = n, replace = FALSE)
+  
+  # get mouse ids from the rows of the subsetted data and filter addcovar to only have these rows
+  match_ids <- rownames(subset_rz_data)
+  addcovar_sub <- addcovar[match_ids, ,drop=FALSE]
+  
+  # now perform genome scan to get LOD scores
+  # uses scan1 to calculate lod scores
+  sub_lip_lod <- scan1(genoprobs = genoprobs,
+                        pheno = subset_rz_data,
+                        kinship = K,
+                        addcovar = addcovar_sub,
+                       cores = 15)
+  
+  # perform the permutations with scan1perm
+  lip_perm <- scan1perm(genoprobs = genoprobs,
+                        pheno = subset_rz_data,
+                        addcovar = addcovar_sub,
+                        n_perm = 1000, 
+                        cores = 15) # speed up the permutations
+  
+  # get the 95% significance threshold from the permutation analysis
+  thr <- summary(object = lip_perm,
+                alpha = 0.05)
+  
+  # identify the significant peaks with find_peaks
+  peaks_lip <- find_peaks(scan1_output = sub_lip_lod, 
+                          map          = map, 
+                          threshold    = thr, 
+                          prob         = 0.95)
+  
+  lip_blup <- NULL # initialize this in case there are no peaks in the next if statement
+  
+  if (nrow(peaks_lip) > 0) { #check to see if there were any peaks
+    # get chromosome where the peak was
+    chr <- peaks_lip$chr[1]
+    
+    #use scan1blup to calculate the blups
+    lip_blup <- scan1blup(genoprobs = genoprobs[,chr],
+                          pheno = subset_rz_data,
+                          kinship = K[[chr]],
+                          addcovar = addcovar_sub,
+                          cores = 10)
+  }
+  
+  #store results in the results list
+    results[[as.character(n)]] <- list(
+    lods = sub_lip_lod,
+    perms = lip_perm,
+    threshold = thr,
+    peaks = peaks_lip,
+    blups = lip_blup
+  )
+    
+  print(paste(n, "subset done"))
+
+}
+
+```
+Notice that we ran the genome scan only once for each sample size. It would be better to run the genome scan multiple times (say 50) for each sample size in order to get a better distribution of results. Does the 50 (or 100, 150, etc) mice that are randomly selected for the subset effect the results? Repeating the scan for each sample size would answer this, but it would take a long time. To help with this, we will make the above chunk of code into a function with the sample size and current iteration index as parameters. Then, we can perform parallelization to speed up the process. 
+
+Here, we reorganize the results list. This new_lists list is indexed by the type of data (lods, perms, threshold, peaks, blups) instead of by the sample size. This makes it a little more intuitive when plotting.
+```{r}
+#| cache: true
+#| label: Organize results
+
+# loop through results list and split by type of data instead of subset
+new_lists <- lapply(1:5, function(i) lapply(results, `[[`, i))
+names(new_lists) <- c("lods", "perms", "threshold", "peaks", "blups")
+
+```
+
+
+## Plots
+Here, we will use the data from the new_lists list to create plots. The first plot is the LOD plots with the significance threshold plotted in red and the maximum LOD score obtained from the full dataset plotted in black.
+```{r}
+#| cache: true
+#| label: LOD plots
+
+max_lod <- full_data_peaks$lod # get maximum LOD from the full dataset genome scan
+
+# loop through new_lists and make LOD plots
+for (i in 1:7) {
+  
+  # visualize the LOD plot for each subset with the 95% significance threshold
+  plot_scan1(x         = new_lists$lods[[i]], 
+             map       = map,
+             lodcolumn = "UNK_9.698_1251.79456_minus",
+             main      = paste("LOD scores, ", subset_sizes[i], "samples"),
+             ylim      = c(0, max_lod + 5)) #fix y limits for comparison
+  
+  abline(h = new_lists$threshold[[i]], col = 'red', lwd = 1)
+  abline(h = max_lod, col = 'black', lwd = 1)
+}
+
+```
+
+Notice that as the sample size decreases, so does the LOD score of the peak on chromosome 10. This indicates that as we decrease the sample size, we lose some of the detection power. In this analysis, no false positives appeared as we decreased sample size, but we can say that in the plots with smaller sample sizes, the non-peaks reached higher LOD scores than those from the scans with greater sample size. In fact, these many of these non-peaks in the smaller sample size scans would be identified as significant if the significance threshold from the higher sample size scans was used. However, with decreased sample size, the signficance threshold increased, seen below. 
+```{r}
+#| cache: true
+#| label: Perm plots
+
+# loop through new_lists and make LODplots
+for (i in 1:7) {
+  
+  # visualize the max LOD distribution with the 95% significance threshold
+  hist(new_lists$perms[[i]],
+       breaks = 20,
+       main = paste("Permutation results, ", subset_sizes[i], "samples"),
+       xlim = c(4, 17))
+  
+  abline(v=new_lists$threshold[[i]], col='red', lwd=2)
+}
+```
+This again highlights the need for repeated scans for the subsets. It is possible that repeating the genome scan using the 50 sample size subset many times would produce a lower average significance threshold. This would then cause false positives to appear in the LOD plots, further highlighting the loss of power.
+
+Now, we use the obtained significance thresholds to find significant peaks at each sample size, and we combine these into an interactive table with the create_dt function.
+```{r}
+#| cache: true
+#| label: Sig peaks
+
+com_peaks_table <- list() # will store combined peaks across all sample sizes
+
+# loop through new_lists and make LODplots
+for (i in 1:7) {
+  
+  #this gets the peaks for the current sample size
+  df <- new_lists$peaks[[i]] |>
+    dplyr::select(-lodindex) |>
+    arrange(chr, pos)
+  
+  # add a sample size column
+  df$sample_size <- subset_sizes[i]
+  
+  # add a peak width column
+  df$peak_width <- df$ci_hi - df$ci_lo
+  
+  com_peaks_table[[i]] <- df
+}
+
+dplyr::bind_rows(com_peaks_table) |> create_dt() #displays results in table
+
+
+```
+From this table, we can see that no false positives were detected, and decreasing the sample size to 50 mice still resulted in enough power to identify the significant peak. Further, we can see that the peak width generally increases as sample size decreases, indicating that we become less certain of the range where the eQTL could be located due to the loss of power. However, there is some variation in this increase. Repeating the scans multiple times to obtain an average peak width would be useful here.
+
+Now, we plot the BLUPs for each sample size on a fixed axis.
+```{r}
+#| cache: true
+#| label: BLUP plots
+
+# loop through new_lists and make LODplots
+for (i in 1:7) {
+  
+  # plot the blups with chromosome position
+  plot_coefCC(x = new_lists$blups[[i]],
+              map = map,
+              legend = "bottomleft",
+              scan1_output = new_lists$lods[[i]],
+              main = paste("BLUPs, ", subset_sizes[i], "samples"),
+              ylim = c(-1.3, 2.3))
+}
+```
+In the 350 through 100 subsets, there seems to be little change in the founder effects. The main difference is that some of the negative founder effects become more negative. This result is amplified in the 50 sample subset, where the negative ones become more negative and the positive ones become more positive.
