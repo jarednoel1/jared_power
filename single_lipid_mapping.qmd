@@ -1,0 +1,281 @@
+---
+title: "Mapping the UNK_9.698_1251.79456_minus phenoptype"
+author: "Jared Noel"
+date: "`r Sys.Date()`"
+format: 
+  html:
+      embed-resources: true
+      standalone: true
+include-in-header:
+  - text: |
+      <style>
+      .panel-tabset > .nav-tabs,
+      .panel-tabset > .tab-content {
+        border: none;
+      }
+      </style>
+code-fold: true
+toc: true
+toc-depth: 5
+toc-expand: true
+editor: 
+  markdown: 
+    wrap: sentence
+---
+
+# Mapping the lipid UNK_9.698_1251.79456_minus
+
+## Load libraries
+
+```{r}
+#| label: Setup
+#| message: false
+library(tidyverse)
+library(ggbeeswarm)
+library(knitr)
+library(qtl2)
+library(AnnotationHub)
+library(DESeq2)
+library(qvalue)
+library(sva)
+library(rtracklayer)
+```
+
+```{r}
+#| label: Load Data
+# read in the data
+LiverLipids_Phenotypes_V11 <- readRDS("_data/LiverLipids_Phenotypes_V11.rds")
+load("../data/rdata/attie.core.GRCm39.v1.Rdata")
+```
+
+## Subset and check UNK_9.698_1251.79456_minus data
+
+The LiverLipids_Phenotypes_V11 dataset contains raw, normalized, and rankZ normalized data for many liver lipids.
+Here, we subset the dataset to isolate the UNK_9.698_1251.79456_minus lipid data and check the distributions of the data to ensure they are properly normalized for qtl2.
+
+```{r}
+#| cache: true
+#| label: Subset Data
+# subset raw data column
+raw_data <- LiverLipids_Phenotypes_V11[[4]][[2]]
+raw_sing_data <- raw_data[, "UNK_9.698_1251.79456_minus", drop=FALSE]
+# check distribution of raw data
+hist(raw_sing_data,
+     breaks = 20,
+     main = "Raw UNK_9.698_1251.79456_minus data")
+
+# subset normalized data column
+norm_data <- LiverLipids_Phenotypes_V11[[4]][[1]]
+norm_sing_data <- norm_data[, "UNK_9.698_1251.79456_minus", drop=FALSE]
+# check distribution of normalized data
+hist(norm_sing_data,
+     breaks = 20,
+     main = "Norm UNK_9.698_1251.79456_minus data")
+
+#subset rank Z data column
+rz_data <- LiverLipids_Phenotypes_V11[[4]][[3]]
+rz_sing_data <- rz_data[, "UNK_9.698_1251.79456_minus", drop=FALSE]
+# check distribution of rankZ data
+hist(rz_sing_data,
+     breaks = 20,
+     main = "RankZ UNK_9.698_1251.79456_minus data")
+```
+
+As we would expect, the rankZ normalization prepares the data best for qtl2, so we will use it from now on.
+
+## Visualize genoprobs for mouse 1
+
+The attie.core.GRCm39.v1 data set contains genotype probabilities for the liver lipid data.
+Here, we visualize the genotype probabilities across all autosomes and the X chromosome of the first mouse in the dataset.
+
+```{r}
+#| cache: true
+#| label: Plot Genoprobs
+# plot genoprobs for mouse 1
+plot_genoprob(genoprobs, map, ind = 1, chr = 1)
+
+```
+
+## Visualize kinship matrices
+
+The attie.core.GRCm39.v1 data set contains kinship matrices, calculated using the "Leave One Chromosome Out" (LOCO) technique.
+Here, we visualize the kinship matrices of each chromosome using the first 50 mice in the dataset.
+
+```{r}
+#| cache: true
+#| label: Kinship
+# use first 50 mice
+n_samples <- 50
+
+#plot kinship matrix as heatmap
+heatmap(K[[1]][1:n_samples, 1:n_samples], main = paste("Kinship Between Mice on Chromosome 1"))
+
+
+```
+
+## Create covariates
+
+The attie.core.GRCm39.v1 data set contains sex, wave number, and batch number as covariates.
+Here, we build the covariate matrix for these three additive covariates to use in the scan1 function.
+
+```{r}
+#| cache: true
+#| label: Covariates
+samp_annot <- LiverLipids_Phenotypes_V11[[2]] #subset the covariate info from the annotation data
+
+#make the covariates factors
+samp_annot$Sex <- factor(samp_annot$Sex)
+samp_annot$Wave <- factor(samp_annot$Wave)
+samp_annot$Batch <- factor(samp_annot$Batch)
+
+# build the covariate matrix
+addcovar <- model.matrix(~Sex + Wave + Batch, data = samp_annot)[, -1, drop=FALSE]
+
+# addocovar only includes rows which don't have NA values. Filter these out so the rows of addcovar match with the rows in the rz_sing_data and store the mouse ids
+mouse_ids <- samp_annot$MouseID[!is.na(samp_annot$Batch)]
+
+# replace the rownames of addcovar with the mouse ids
+rownames(addcovar) <- mouse_ids
+```
+
+## Genome scan!
+
+Here, we use the scan1 function to perform a genome scan which maps the rankZ normalized UNK_9.698_1251.79456_minus phenotype data.
+This calculates the LOD score at each marker in the map list.
+We expect to see a LOD plot similar to the one that was made from the GRCm38 assembly available on <a href="https://churchilllab.jax.org/qtlviewer/attie/DO500HFD" target="_blank">QTL Viewer</a> .
+
+```{r}
+#| cache: true
+#| label: Genome Scan
+# uses scan1 to calculate lod scores
+sing_lip_lod <- scan1(genoprobs = genoprobs,
+                      pheno = rz_sing_data,
+                      kinship = K,
+                      addcovar = addcovar)
+```
+
+```{r}
+#| cache: true
+#| label: Plot Genome Scan
+# uses plot_scan 1 and the sing_lip_lod output to make a lod plot
+plot_scan1(x         = sing_lip_lod, 
+           map       = map,
+           lodcolumn = "UNK_9.698_1251.79456_minus",
+           main      = "UNK_9.698_1251.79456_minus", 
+           bgcolor = "gray95")
+```
+
+Our LOD plot shows the same peak on chromosome 10 as the plot available on QTL Viewer.
+Slight shifts in the peak are due to the change from the GRCm38 assembly to GRCm39.
+
+## Permuatations
+
+By permuting the phenotype data and performing the mapping procedure, we effectively break the bond between the genotype and phenotype data, allowing us to identify the maximum LOD score that occurs due to chance alone. If we perform 1000 permutations, we can obtain a 95% significance threshold from the distribution of max LOD scores, and this threshold can be used to determine significant peaks in the LOD plot.
+
+```{r}
+#| cache: true
+#| label: Permutations
+# perform the permutations with scan1perm
+lip_perm <- scan1perm(genoprobs = genoprobs,
+                      pheno = rz_sing_data,
+                      addcovar = addcovar,
+                      n_perm = 1000, 
+                      cores = 10) # speed up the permutations
+```
+
+```{r}
+#| cache: true
+#| label: Significance Threshold
+# get the 95% significance threshold from the permutation analysis
+thr <- summary(object = lip_perm,
+              alpha = 0.05)
+thr
+
+# visualize the max LOD distribution with the 95% significance threshold
+hist(lip_perm,
+     breaks = 20,
+     main = "UNK_9.698_1251.79456_minus Permuation Results")
+
+abline(v=thr, col='red', lwd=2)
+```
+
+```{r}
+#| cache: true
+#| label: LOD Plot with Significance Threshold
+# visualize the LOD plot again but with the 95% significance threshold
+plot_scan1(x         = sing_lip_lod, 
+           map       = map,
+           lodcolumn = "UNK_9.698_1251.79456_minus",
+           main      = "UNK_9.698_1251.79456_minus",
+           bgcolor = "gray95")
+
+abline(h = thr, col = 'red', lwd = 1)
+```
+
+## Find significant peaks
+
+Using the threshold found by the permutation analysis, we can identify which peaks from the genome scan are significant.
+
+```{r}
+#| cache: true
+#| label: Find peaks
+# identify the significant peaks with find_peaks
+peaks_lip <- find_peaks(scan1_output = sing_lip_lod, 
+                        map          = map, 
+                        threshold    = thr, 
+                        prob         = 0.95)
+
+# display the significant peaks
+peaks_lip |> 
+  dplyr::select(-lodindex) |>
+  arrange(chr, pos) |>
+  kable(caption = "UNK_9.698_1251.79456_minus QTL Peaks")
+```
+
+## Founder Effects
+
+Using the LOD scores returned from the genome scan, we can estimate the effects of 8 founder alleles from the Diversity Outbred mouse population.
+This is done by treating the founder allele effects as random and calculating the Best Linear Unbiased Predictors (BLUPs).
+
+```{r}
+#| cache: true
+#| label: Estimate BLUPs
+# get chromosome where the peak was
+chr <- peaks_lip$chr[1]
+
+#use scan1blup to calculate the blups
+lip_blup <- scan1blup(genoprobs = genoprobs[,chr],
+                      pheno = rz_sing_data,
+                      kinship = K[[chr]],
+                      addcovar = addcovar,
+                      cores = 10)
+```
+
+```{r}
+#| cache: true
+#| label: Plot BLUPs
+# plot the blups with chromosome position
+plot_coefCC(x = lip_blup,
+            map = map,
+            legend = "bottomleft",
+            scan1_output = sing_lip_lod,
+            main = "UNK_9.698_1251.79456_minus",
+            bgcolor = "gray95")
+```
+## Heritability
+```{r}
+kin_overall <- calc_kinship(probs = genoprobs,
+                            type = "overall", 
+                            cores = 10)
+
+sing_lip_herit <- est_herit(pheno = rz_sing_data,
+                        kinship = kin_overall,
+                        addcovar = addcovar,
+                        cores = 10)
+```
+
+## PVE
+```{r}
+sing_lip_pve = 1 - 10**((-2/384)*max(sing_lip_lod))
+```
+
