@@ -1,0 +1,1674 @@
+---
+title: "Mapping the UNK_9.698_1251.79456_minus phenoptype"
+author: "Jared Noel"
+date: "`r Sys.Date()`"
+format: 
+  html:
+      embed-resources: true
+      standalone: true
+include-in-header:
+  - text: |
+      <style>
+      .panel-tabset > .nav-tabs,
+      .panel-tabset > .tab-content {
+        border: none;
+      }
+      </style>
+code-fold: true
+toc: true
+toc-depth: 5
+toc-expand: true
+editor: 
+  markdown: 
+    wrap: sentence
+---
+
+# Mapping UNK_9.698_1251.79456_minus with nested subsetting
+The goal of this document is to map a single trait, the UNK_9.698_1251.79456_minus lipid, using nested subsets of the Attie GRCm39 dataset. A scan using the full 384 samples in the dataset was performed previously. From the full 384 samples, we will randomly select 350 of them and perform the scan, then we will select 300 of those 350 and perform the scan, and so on until we reach 50 samples. We expect that decreasing the sample size will decrease the mapping power, so we will look at the max LOD scores, the significant peaks identified and their positions, the founder allele effects, the heritability, and the accuracy for each sample size across multiple nested subsets.
+
+## Setup
+```{r}
+#| label: Setup
+#| message: false
+
+library(tidyverse)
+library(ggplot2)
+library(knitr)
+library(qtl2)
+library(rtracklayer)
+library(tibble)
+library(RColorBrewer)
+library(Hmisc)
+library(ggbeeswarm)
+library(ggridges)
+library(pheatmap)
+library(PRROC)
+library(Polychrome)
+library(patchwork)
+library(ggradar)
+library(plotly)
+library(caret)
+
+# this is a function to make nicer tables than knitr
+create_dt <- function(x){
+  # x <- x |> mutate_if(is.numeric, round, 2)
+  DT::datatable(x,
+                extensions = 'Buttons',
+                rownames = FALSE, 
+                filter="top",
+                options = list(dom = 'Blfrtip',
+                               buttons = c('copy', 'csv', 'excel'),
+                               pageLength = 5, 
+                               scrollX= TRUE
+                               ))
+
+}
+
+set.seed(55555)
+```
+
+```{r}
+#| cache: true
+#| label: Color Palette
+#| message: false
+
+# creates color palette with 50 shades
+mypal <- createPalette(50, seedcolors = c("#F1B6DA", "#B5DAFE"))
+
+names(mypal) <- NULL
+```
+
+```{r}
+#| label: Load Data
+#| message: false
+
+nested_iterations <- readRDS("/projects/munger-lab/projects/DO_Attie500/jared_power/_data/nested_iterations.rds")
+nested_iterations_rep2 <- readRDS("/projects/munger-lab/projects/DO_Attie500/jared_power/_data/nested_iterations_rep2.rds")
+nested_iterations_rep3 <- readRDS("/projects/munger-lab/projects/DO_Attie500/jared_power/_data/nested_iterations_rep3.rds")
+nested_iterations_rep4 <- readRDS("/projects/munger-lab/projects/DO_Attie500/jared_power/_data/nested_iterations_rep4.rds")
+nested_iterations_rep5 <- readRDS("/projects/munger-lab/projects/DO_Attie500/jared_power/_data/nested_iterations_rep5.rds")
+big_nested_iterations <- c(nested_iterations, nested_iterations_rep2, nested_iterations_rep3, nested_iterations_rep4, nested_iterations_rep5)
+
+seed_list <- readLines("/projects/munger-lab/projects/DO_Attie500/jared_power/_data/seed_list.txt")
+seed_list_rep2 <- readLines("/projects/munger-lab/projects/DO_Attie500/jared_power/_data/seed_list_rep2.txt")
+seed_list_rep3 <- readLines("/projects/munger-lab/projects/DO_Attie500/jared_power/_data/seed_list_rep3.txt")
+seed_list_rep4 <- readLines("/projects/munger-lab/projects/DO_Attie500/jared_power/_data/seed_list_rep4.txt")
+seed_list_rep5 <- readLines("/projects/munger-lab/projects/DO_Attie500/jared_power/_data/seed_list_rep5.txt")
+seeds <- c(seed_list, seed_list_rep2, seed_list_rep3, seed_list_rep4, seed_list_rep5)
+
+sing_lip_lod <- readRDS("/projects/munger-lab/projects/DO_Attie500/jared_power/_data/sing_lip_lod.rds")
+
+full_dataset_blups <- readRDS("/projects/munger-lab/projects/DO_Attie500/jared_power/_data/full_dataset_blups.rds")
+
+full_dataset_peaks <- readRDS("/projects/munger-lab/projects/DO_Attie500/jared_power/_data/full_dataset_peaks.rds")
+
+rz_sing_data <- readRDS("/projects/munger-lab/projects/DO_Attie500/jared_power/_data/rz_sing_data.rds")
+
+load("/projects/munger-lab/projects/DO_Attie500/data/rdata/attie.core.GRCm39.v1.Rdata")
+
+LiverLipids_Phenotypes_V11 <- readRDS("/projects/munger-lab/projects/DO_Attie500/jared_power/_data/LiverLipids_Phenotypes_V11.rds")
+
+sing_lip_pve <- readRDS("/projects/munger-lab/projects/DO_Attie500/jared_power/_data/sing_lip_pve.rds")
+
+sing_lip_herit <- readRDS("/projects/munger-lab/projects/DO_Attie500/jared_power/_data/sing_lip_herit.rds")
+```
+
+```{r}
+#| cache: true
+#| label: Get sample list function
+#| message: false
+
+# this function generates the nested subsets
+get_sample_list <- function(data) {
+  data <- as.data.frame(data)
+  samp_350 <- slice_sample(data, n = 350, replace = FALSE)
+  samp_300 <- slice_sample(samp_350, n = 300, replace = FALSE)
+  samp_250 <- slice_sample(samp_300, n = 250, replace = FALSE)
+  samp_200 <- slice_sample(samp_250, n = 200, replace = FALSE)
+  samp_150 <- slice_sample(samp_200, n = 150, replace = FALSE)
+  samp_100 <- slice_sample(samp_150, n = 100, replace = FALSE)
+  samp_50 <- slice_sample(samp_100, n = 50, replace = FALSE)
+  
+  sample_list <- tibble::lst(samp_350, samp_300, samp_250, samp_200, samp_150, samp_100, samp_50)
+  return(sample_list)
+}
+```
+
+```{r}
+#| cache: true
+#| label: Addcovar
+#| message: false
+
+#subset the covariate info from the annotation data
+samp_annot <- LiverLipids_Phenotypes_V11[[2]]
+
+# make the covariates factors
+samp_annot$Sex <- factor(samp_annot$Sex)
+samp_annot$Wave <- factor(samp_annot$Wave)
+samp_annot$Batch <- factor(samp_annot$Batch)
+
+# build the covariate matrix
+addcovar <- model.matrix(~Sex + Wave + Batch, data = samp_annot)[, -1, drop=FALSE]
+
+# addocovar only includes rows which don't have NA values. Filter these out so the rows of 
+# addcovar match with the rows in the rz_sing_data and store the mouse ids
+mouse_ids <- samp_annot$MouseID[!is.na(samp_annot$Batch)]
+
+# replace the rownames of addcovar with the mouse ids
+rownames(addcovar) <- mouse_ids # this addcovar is now the one subsetted in the function
+```
+
+
+## Max LOD
+First we will look at how the max LOD score changes with sample size over multiple iterations. We expect that as the sample size decreases, the mapping power will also decrease, leading to lower max LOD scores. The max LOD scores seen here are calculated from the scan1 function in the qtl2 package. For iterations that identified a single peak, the LOD score at this point is the max LOD score. For those that identified either no peaks or more than one peak, the max LOD at any point in the genome was taken, even if it was not associated with the true peak on chromosome 10.
+
+::: {.panel-tabset .nav-pills}
+
+# Iterations
+Here, we plot the max LOD score at each sample size, grouped by nest.
+```{r}
+#| cache: true
+#| label: LOD vs. Sample Size
+#| message: false
+
+max_lods <- data.frame(sample_size = numeric(), max_lod = numeric(), iteration = integer())
+for (i in 1:50) { # loops through iterations
+  temp_max_lods <- data.frame(sample_size = numeric(), max_lod = numeric(), iteration = integer())
+  for (j in 1:7) { # loops through sample sizes
+    max_lod <- big_nested_iterations[[i]][[j]]$peaks$peaks$max_lod[1]
+    sample_size <- big_nested_iterations[[i]][[j]]$peaks$sample_size
+    
+    # stores info in temporary array
+    temp_max_lods[j, ] <- c(sample_size, max_lod, i)
+  }
+  
+  # binds the info about each subset with the "ground truth"
+  all_samples <- data.frame(sample_size = 384, max_lod = max(sing_lip_lod), iteration = i)
+  temp_max_lods <- rbind(all_samples, temp_max_lods)
+  
+  # binds this info togethr for all iterations
+  max_lods <- rbind(max_lods, temp_max_lods)
+}
+
+colnames(max_lods) <- c("sample_size", "max_lod", "iteration")
+max_lods$iteration <- as.factor(max_lods$iteration)
+
+max_lods |>
+  ggplot( aes(x=sample_size, y = max_lod, group=iteration, color=iteration)) +
+  geom_line() +
+  geom_point() + 
+  scale_x_continuous(name = "Sample Size", breaks = seq(50, 350, by = 50)) +
+  scale_y_continuous(name = "Max LOD", breaks = seq(0, 70, by = 10)) +
+  scale_color_manual(values = mypal) +
+  theme(panel.background = element_rect(fill = "gray95"))
+
+```
+We can see that over all iterations, the relationship between the max LOD and the sample size is pretty linear. A few iterations, namely 37 and 43, drop off a bit quicker than the rest, but not by much.
+
+# Boxplot
+Here, we plot the same information as above grouped by sample size instead of iteration. This gives us a look at the distribution of the max LOD scores at each sample size and how these distributions compare. 
+```{r}
+max_lods |> 
+  ggplot(aes(x = as.factor(sample_size), y =max_lod, color = as.factor(sample_size))) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter() +
+  scale_color_brewer(palette = "Set3") +
+  stat_boxplot(geom = "errorbar", width = 0.25) + 
+  theme(panel.background = element_rect(fill = "gray95")) + 
+  labs(x = "Sample Size", y = "Max LOD", color = "Iteration")
+```
+Again, we see that the decrease in max LOD score seems linear with decreasing sample size.
+
+# Binned Ridgeline
+Here, we plot the same information as in the box plots as a binned ridgeline graph, where the color gradient represents the max LOD scores.
+```{r}
+#| cache: true
+#| label: LOD vx. sample size ridge line
+#| message: false
+
+ggplot(max_lods, aes(x = max_lod, y = as.factor(sample_size), fill = after_stat(x))) +
+  geom_density_ridges_gradient(stat = "binline", bins = 30, alpha = 0.4) + 
+  scale_fill_viridis_c(option = "B") +
+  theme(panel.background = element_rect(fill = "gray95")) + 
+  labs(x = "Max LOD", y = "Sample Size", color = "Max LOD")
+
+```
+From this, we can see that as the sample size decreases, the distribution of max LOD scores widens. This is most noticeable when comparing the 350 subset distribution to the other 6. The 50 subset distribution is a little tighter than the rest besides the 350 subset.
+
+# Regular Ridgeline
+This is the same plot as above with regular distribution curves instead of binned.
+```{r}
+ggplot(max_lods, aes(x = max_lod, y = as.factor(sample_size), fill = after_stat(x))) +
+  geom_density_ridges_gradient(alpha =0.4) + 
+  scale_fill_viridis_c(option = "B") +
+  theme(panel.background = element_rect(fill = "gray95"))
+```
+This shows the same information as the binned ridgeline graph concerning the width of the distributions. I think the binned graph is better because it gives a better idea of the actual shape of the distribution than this one. As we do more iterations, this one might become more useful. 
+
+:::
+
+## Peaks
+Next, we will look at the peaks identified by the scans. For each iteration of each sample size, we performed 1000 permutations to determine the significance threshold for the LOD scores. Then, any places in the genome where the LOD score surpassed this threshold were deemed peaks. The "ground truth" for this data set is a single large peak on chromosome 10 at position 127.0022. In this section, we identify all the peaks found for each iteration and compare their positions and widths.
+
+::: {.panel-tabset .nav-pills}
+
+# Table
+First, we display all of the significant peaks found across the genome. This table includes the chromosome and position the peak was found on, the LOD score of that peak, the low and high values of the Bayes 95% confidence interval, the marker the peak was found on, the max LOD for that iteration and sample size, and the width of the confidence interval. 
+```{r}
+#| cache: true
+#| label: Table of Peaks
+#| message: false
+
+com_peaks_table <- list() # will store combined peaks across all sample sizes
+row_index <- 1
+
+# loop through new_lists and make LODplots
+for (i in 1:50) {
+  for (j in 1:7) {
+  
+  if (big_nested_iterations[[i]][[j]]$peaks$peak_found == TRUE) {
+    df <- big_nested_iterations[[i]][[j]]$peaks$peaks |>
+    dplyr::select(-lodindex) |>
+    arrange(chr, pos)
+  
+    # add a replicate column
+    df$replicate <- i
+  
+    # add a sample size column
+    df$sample_size <- as.numeric(names(big_nested_iterations[[i]])[j])
+  
+    # add a peak width column
+    df$peak_width <- df$ci_hi - df$ci_lo
+  
+    com_peaks_table[[row_index]] <- df
+    row_index <- row_index + 1
+  }
+  }
+}
+
+dplyr::bind_rows(com_peaks_table) |> create_dt() #displays results in table
+```
+All 50 iterations for sample sizes 350 through 100 identified the true peak. Only 31 of the 50 iterations from the sample size 50 found the true peak. Additionally, 2 iterations identified peaks on chromosome 1 (200 and 300 samples), one on chromosome 4 (200 samples), and 1 on chromosome 8 (50 samples). 17 iterations found a peak on chromosome 15 (6 from 350 samples, 5 from 300, 3 from 250, 2 from 200, and 1 from 100). 2 iterations found peaks on chromosome 13 (250 and 200 samples), and 1 found a peak on chromosome 12 (100 samples). Total, this means 331 of the 350 sample size-iteration pairs found the true peak, and there were 24 false peaks found.
+
+# Positions
+The true location of the peak is 127.0022 on chromosome 10, as identified by the full dataset. Here, we look at the distribution of peak locations across iterations and sample sizes. For this, we only look at the 331 samples which identified the correct peak on chromosome 10.
+
+::: {.panel-tabset .nav-pills}
+
+# Boxplot
+First, we show a box blot of peak positions, grouped by sample size. The x axis represents the position on chromosome 10, and the black vertical line is the true peak location.
+```{r}
+#| cache: true
+#| label: Position of peak
+#| message: false
+#| warning: false
+
+lod_pos <- data.frame(position = numeric(), sample_size = integer())
+
+for (i in 1:50) {
+  temp_lod_pos <- data.frame(position = numeric(), sample_size = integer())
+  for (j in 1:7) {
+    pos <- max(big_nested_iterations[[i]][[j]]$peaks$peaks$pos)
+
+    sample_size <- big_nested_iterations[[i]][[j]]$peaks$sample_size
+    
+    temp_lod_pos[j, ] <- c(pos, sample_size)
+  }
+  lod_pos <- rbind(lod_pos, temp_lod_pos)
+}
+
+ggplot(lod_pos, aes(y = factor(sample_size), x = position, colour = as.factor(sample_size))) +
+  geom_boxplot(outlier.shape = NA) +
+  scale_color_brewer(palette = "Set3") +
+  geom_jitter() +
+  geom_vline(xintercept = full_dataset_peaks$pos, linetype = "dashed", color = "black", size = 0.5) +
+  theme(panel.background = element_rect(fill = "gray95")) +
+  xlim(126.5, 127.5) + 
+  labs(x = "Postion", y = "Sample Size", color = "Sample Size")
+
+```
+As the sample size decreases, the location of the identified peak becomes less accurate and more widely distributed across iterations. There is almost no distribution in the 350 and 300 sample sizes, while the distribution is very wide in the 50 sample size.
+
+# Binned Ridgeline
+This plots the same information as in the box plot as a binned ridgeline plot. 
+```{r}
+ggplot(lod_pos, aes(x = position, y = as.factor(sample_size), fill = after_stat(x))) +
+  geom_density_ridges_gradient(stat = "binline", bins = 20, alpha = 0.4) + 
+  scale_fill_viridis_c(option = "B") +
+  theme(panel.background = element_rect(fill = "gray95")) + 
+  xlim(126.5, 127.5) +
+  labs(x = "Postion", y = "Sample Size", color = "Sample Size")
+```
+This does not show any new information. I thought the gradient based on position would be cool, but the data is not spread wide enough.
+
+:::
+
+# Widths
+The Bayes 95% confidence interval gives the range of positions where there is a 95% chance of finding the true peak. If we have more samples, we expect to achieve more accuracy in the location of the peak, so the 95% confidence interval should be small. Then, as we decrease the sample size, we expect the interval to get wider. Here, there x-axis again represents position on chromosome 10. The blue dots represent the average lower bounds of the Bayes 95% confidence intervals for each sample size across all 50 iterations, and the red dots represent the average upper bounds. The vertical black line represents the true position of the peak. 
+```{r}
+#| cache: true
+#| label: dumbbell plot for peak widths
+#| message: false
+
+big_widths <- data.frame(sample_size = integer(), iteration = integer(), low = numeric(), high = numeric(), max_lod = numeric())
+big_pos <- data.frame(sample_size = integer(), iteration = integer(), pos = numeric())
+
+for (i in 1:50) {
+  for (j in 1:7) {
+    
+    if (i == 4 & j == 4) {
+        low <- big_nested_iterations[[i]][[j]]$peaks$peaks$ci_lo[2]
+        high <- big_nested_iterations[[i]][[j]]$peaks$peaks$ci_hi[2]
+        pos <- big_nested_iterations[[i]][[j]]$peaks$peaks$pos[2]
+    } else if ( i == 39 & j == 4) {
+        low <- big_nested_iterations[[i]][[j]]$peaks$peaks$ci_lo[2]
+        high <- big_nested_iterations[[i]][[j]]$peaks$peaks$ci_hi[2]
+        pos <- big_nested_iterations[[i]][[j]]$peaks$peaks$pos[2]
+    } else if ( i == 44 & j == 2) {
+        low <- big_nested_iterations[[i]][[j]]$peaks$peaks$ci_lo[2]
+        high <- big_nested_iterations[[i]][[j]]$peaks$peaks$ci_hi[2]
+        pos <- big_nested_iterations[[i]][[j]]$peaks$peaks$pos[2]
+    } else if ( i == 28 & j == 7) {
+        low <- big_nested_iterations[[i]][[j]]$peaks$peaks$ci_lo[2]
+        high <- big_nested_iterations[[i]][[j]]$peaks$peaks$ci_hi[2]
+        pos <- big_nested_iterations[[i]][[j]]$peaks$peaks$pos[2]
+    } else {
+        low <- big_nested_iterations[[i]][[j]]$peaks$peaks$ci_lo[1]
+        high <- big_nested_iterations[[i]][[j]]$peaks$peaks$ci_hi[1]
+        pos <- big_nested_iterations[[i]][[j]]$peaks$peaks$pos[1]
+    }
+
+    sample_size <- as.numeric(names(big_nested_iterations[[i]])[j])
+    max_lod <- big_nested_iterations[[i]][[j]]$peaks$peaks$max_lod
+    
+    width_row <- data.frame(sample_size = sample_size, iteration = i, low = low, high = high, max_lod = max_lod)
+    pos_row <- data.frame(sample_size = sample_size, iteration = i, pos = pos)
+    
+    big_widths <- rbind(big_widths, width_row)
+    big_pos <- rbind(big_pos, pos_row)
+  }
+}
+
+
+big_widths <- big_widths %>% filter(!is.na(low) & !is.na(high))
+big_pos <- big_pos |> filter(!is.na(pos))
+
+big_widths$low <- as.numeric(as.character(big_widths$low))
+big_widths$high <- as.numeric(as.character(big_widths$high))
+big_pos$pos <- as.numeric(as.character(big_pos$pos))
+
+average_widths <- big_widths |>
+  group_by(sample_size) |> 
+  summarise(low = mean(low, na.rm = TRUE), high = mean(high, na.rm = TRUE))
+
+average_widths <- average_widths |> pivot_longer(cols = c(low, high), names_to = "variable", values_to = "values")
+
+full_data_low <- data.frame(sample_size = 384, variable = "low", values = full_dataset_peaks$ci_lo)
+full_data_high <- data.frame(sample_size = 384, variable = "high", values = full_dataset_peaks$ci_hi)
+
+average_widths <- rbind(full_data_low, full_data_high, average_widths)
+
+iterations <- unique(big_widths$iteration)
+
+average_widths <- pivot_wider(average_widths, names_from = variable, values_from = values)
+
+ggplot(average_widths, aes(x = values, y = sample_size)) +
+  geom_segment(aes(x = low, xend = high, yend = sample_size)) +
+  geom_point(aes(x = low), shape = 21, fill = "cornflowerblue", size = 4) +
+  geom_point(aes(x = high), shape = 21, fill = "brown3", size = 4) +
+  theme(panel.background = element_rect(fill = "gray95")) + 
+  geom_vline(xintercept = full_dataset_peaks$pos, linetype = "dashed") + 
+  labs(x = "Position", y = "Sample Size", title = "Average peak widths across iterations") +
+  xlim(126.25, 127.75)
+```
+
+:::
+
+## Founder Effects
+Next, we will look at the founder allele effects and how they vary with sample size. For each scan, we obtain a matrix of BLUPs for each Diversity Outbred founder (A-H) at each marker in the genome. We can compare the founder effects at the marker where the true peak is located from each sample size-iteration pair with those from the full dataset to see how the correlation varies with sample size. We can also compare the average BLUPs across sample sizes.
+
+::: {.panel-tabset .nav-pills}
+
+# Correlations
+We can calculate the correlation between the founder effects of each sample size-iteration pair and those from the full dataset using the Pearson or Spearman correlations. The Pearson correlation measures linear relationships, while the Spearman correlation measures monotic relationships. Here, we will compute both for all sample-size iteration pairs and compare them.
+
+::: {.panel-tabset .nav-pills}
+
+# Pearson
+First, we compute the Pearson correlation values and plot them as a heatmap.
+```{r}
+#| cache: true
+#| label: correlation matrix
+#| message: false
+
+corr_mat_p <- data.frame()
+corr_mat_s <- data.frame()
+full_qtl_blups <- full_dataset_blups[which(rownames(full_dataset_blups) == "UNC18956869"), 1:8]
+
+for (i in 1:50) {
+  for (j in 1:7) {
+
+    current_sub_blups <- big_nested_iterations[[i]][[j]]$blups$blups
+    
+    current_sub_qtl_blups <- current_sub_blups[which(rownames(current_sub_blups) == "UNC18956869"), 1:8]
+    
+    if (length(current_sub_qtl_blups > 0)) {
+      if (!is.null(current_sub_qtl_blups)) {
+      temp_mat <- cbind(full_qtl_blups, current_sub_qtl_blups)
+      
+      result_p <- rcorr(temp_mat)
+      result_s <- rcorr(temp_mat, type = "spearman")
+    
+      corr_val_p <- result_p$r[1,2]
+      corr_val_s <- result_s$r[1,2]
+      corr_mat_p[i,j] <- corr_val_p
+      corr_mat_s[i,j] <- corr_val_s
+    }
+    }
+  }
+}
+
+```
+
+```{r}
+#| label: Fixing the Correlation Matrix
+#| message: false
+#| cache: true
+
+#for the 2nd replicate
+set.seed(as.numeric(seeds[2]))
+
+samp_list_2 <- get_sample_list(rz_sing_data)
+
+match_ids <- rownames(samp_list_2[[7]])
+addcovar_sub <- addcovar[match_ids, ,drop=FALSE]
+
+sub_blups_2 <- scan1blup(genoprobs = genoprobs[,10],
+                            pheno = samp_list_2[[7]],
+                            kinship = K[[10]],
+                            addcovar = addcovar_sub,
+                            cores = 10) 
+
+big_nested_iterations[[2]][[7]]$blups$blups <- sub_blups_2
+
+#for the 4th replicate
+set.seed(as.numeric(seeds[4]))
+
+samp_list_4 <- get_sample_list(rz_sing_data)
+
+match_ids <- rownames(samp_list_4[[4]])
+addcovar_sub <- addcovar[match_ids, ,drop=FALSE]
+
+sub_blups_4 <- scan1blup(genoprobs = genoprobs[,10],
+                            pheno = samp_list_4[[4]],
+                            kinship = K[[10]],
+                            addcovar = addcovar_sub,
+                            cores = 10) 
+
+big_nested_iterations[[4]][[4]]$blups$blups <- sub_blups_4
+
+# for the 8th replicate
+set.seed(as.numeric(seeds[8]))
+
+samp_list_8 <- get_sample_list(rz_sing_data)
+
+match_ids <- rownames(samp_list_8[[7]])
+addcovar_sub <- addcovar[match_ids, ,drop=FALSE]
+
+sub_blups_8 <- scan1blup(genoprobs = genoprobs[,10],
+                            pheno = samp_list_8[[7]],
+                            kinship = K[[10]],
+                            addcovar = addcovar_sub,
+                            cores = 10)  
+
+big_nested_iterations[[8]][[7]]$blups$blups <- sub_blups_8
+
+# for the 10th replicate
+set.seed(as.numeric(seeds[10]))
+
+samp_list_10 <- get_sample_list(rz_sing_data)
+
+match_ids <- rownames(samp_list_10[[7]])
+addcovar_sub <- addcovar[match_ids, ,drop=FALSE]
+
+sub_blups_10 <- scan1blup(genoprobs = genoprobs[,10],
+                            pheno = samp_list_10[[7]],
+                            kinship = K[[10]],
+                            addcovar = addcovar_sub,
+                            cores = 10) 
+
+big_nested_iterations[[10]][[7]]$blups$blups <- sub_blups_10
+
+# for the 11th replicate
+set.seed(as.numeric(seeds[11]))
+
+samp_list_11 <- get_sample_list(rz_sing_data)
+
+match_ids <- rownames(samp_list_11[[7]])
+addcovar_sub <- addcovar[match_ids, ,drop=FALSE]
+
+sub_blups_11 <- scan1blup(genoprobs = genoprobs[,10],
+                            pheno = samp_list_11[[7]],
+                            kinship = K[[10]],
+                            addcovar = addcovar_sub,
+                            cores = 10) 
+
+big_nested_iterations[[11]][[7]]$blups$blups <- sub_blups_11
+
+# for the 16th replicate
+set.seed(as.numeric(seeds[16]))
+
+samp_list_16 <- get_sample_list(rz_sing_data)
+
+match_ids <- rownames(samp_list_16[[7]])
+addcovar_sub <- addcovar[match_ids, ,drop=FALSE]
+
+sub_blups_16 <- scan1blup(genoprobs = genoprobs[,10],
+                            pheno = samp_list_16[[7]],
+                            kinship = K[[10]],
+                            addcovar = addcovar_sub,
+                            cores = 10) 
+
+big_nested_iterations[[16]][[7]]$blups$blups <- sub_blups_16
+
+# for the 17th replicate
+set.seed(as.numeric(seeds[17]))
+
+samp_list_17 <- get_sample_list(rz_sing_data)
+
+match_ids <- rownames(samp_list_17[[7]])
+addcovar_sub <- addcovar[match_ids, ,drop=FALSE]
+
+sub_blups_17 <- scan1blup(genoprobs = genoprobs[,10],
+                            pheno = samp_list_17[[7]],
+                            kinship = K[[10]],
+                            addcovar = addcovar_sub,
+                            cores = 10) 
+
+big_nested_iterations[[17]][[7]]$blups$blups <- sub_blups_17
+
+# for the 10th replicate
+set.seed(as.numeric(seeds[18]))
+
+samp_list_18 <- get_sample_list(rz_sing_data)
+
+match_ids <- rownames(samp_list_18[[7]])
+addcovar_sub <- addcovar[match_ids, ,drop=FALSE]
+
+sub_blups_18 <- scan1blup(genoprobs = genoprobs[,10],
+                            pheno = samp_list_18[[7]],
+                            kinship = K[[10]],
+                            addcovar = addcovar_sub,
+                            cores = 10) 
+
+big_nested_iterations[[18]][[7]]$blups$blups <- sub_blups_18
+
+# for the 22nd replicate
+set.seed(as.numeric(seeds[22]))
+
+samp_list_22 <- get_sample_list(rz_sing_data)
+
+match_ids <- rownames(samp_list_22[[7]])
+addcovar_sub <- addcovar[match_ids, ,drop=FALSE]
+
+sub_blups_22 <- scan1blup(genoprobs = genoprobs[,10],
+                            pheno = samp_list_22[[7]],
+                            kinship = K[[10]],
+                            addcovar = addcovar_sub,
+                            cores = 10) 
+
+big_nested_iterations[[22]][[7]]$blups$blups <- sub_blups_22
+
+# for the 23rd replicate
+set.seed(as.numeric(seeds[23]))
+
+samp_list_23 <- get_sample_list(rz_sing_data)
+
+match_ids <- rownames(samp_list_23[[7]])
+addcovar_sub <- addcovar[match_ids, ,drop=FALSE]
+
+sub_blups_23 <- scan1blup(genoprobs = genoprobs[,10],
+                            pheno = samp_list_23[[7]],
+                            kinship = K[[10]],
+                            addcovar = addcovar_sub,
+                            cores = 10) 
+
+big_nested_iterations[[23]][[7]]$blups$blups <- sub_blups_23
+
+# for the 24th replicate
+set.seed(as.numeric(seeds[24]))
+
+samp_list_24 <- get_sample_list(rz_sing_data)
+
+match_ids <- rownames(samp_list_24[[2]])
+addcovar_sub <- addcovar[match_ids, ,drop=FALSE]
+
+sub_blups_24 <- scan1blup(genoprobs = genoprobs[,10],
+                            pheno = samp_list_24[[2]],
+                            kinship = K[[10]],
+                            addcovar = addcovar_sub,
+                            cores = 10)
+
+big_nested_iterations[[24]][[2]]$blups$blups <- sub_blups_24
+
+# for the 25th replicate
+set.seed(as.numeric(seeds[25]))
+
+samp_list_25 <- get_sample_list(rz_sing_data)
+
+match_ids <- rownames(samp_list_25[[7]])
+addcovar_sub <- addcovar[match_ids, ,drop=FALSE]
+
+sub_blups_25 <- scan1blup(genoprobs = genoprobs[,10],
+                            pheno = samp_list_25[[7]],
+                            kinship = K[[10]],
+                            addcovar = addcovar_sub,
+                            cores = 10)
+
+big_nested_iterations[[25]][[7]]$blups$blups <- sub_blups_25
+
+# for the 26th replicate
+set.seed(as.numeric(seeds[26]))
+
+samp_list_26 <- get_sample_list(rz_sing_data)
+
+match_ids <- rownames(samp_list_26[[7]])
+addcovar_sub <- addcovar[match_ids, ,drop=FALSE]
+
+sub_blups_26 <- scan1blup(genoprobs = genoprobs[,10],
+                            pheno = samp_list_26[[7]],
+                            kinship = K[[10]],
+                            addcovar = addcovar_sub,
+                            cores = 10) 
+
+big_nested_iterations[[26]][[7]]$blups$blups <- sub_blups_26
+
+# for the 27th replicate
+set.seed(as.numeric(seeds[27]))
+
+samp_list_27 <- get_sample_list(rz_sing_data)
+
+match_ids <- rownames(samp_list_27[[7]])
+addcovar_sub <- addcovar[match_ids, ,drop=FALSE]
+
+sub_blups_27 <- scan1blup(genoprobs = genoprobs[,10],
+                            pheno = samp_list_27[[7]],
+                            kinship = K[[10]],
+                            addcovar = addcovar_sub,
+                            cores = 10) 
+
+big_nested_iterations[[27]][[7]]$blups$blups <- sub_blups_27
+
+# for the 28th replicate
+set.seed(as.numeric(seeds[28]))
+
+samp_list_28 <- get_sample_list(rz_sing_data)
+
+match_ids <- rownames(samp_list_28[[7]])
+addcovar_sub <- addcovar[match_ids, ,drop=FALSE]
+
+sub_blups_28 <- scan1blup(genoprobs = genoprobs[,10],
+                            pheno = samp_list_28[[7]],
+                            kinship = K[[10]],
+                            addcovar = addcovar_sub,
+                            cores = 10) 
+
+big_nested_iterations[[28]][[7]]$blups$blups <- sub_blups_28
+
+# for the 30th replicate
+set.seed(as.numeric(seeds[30]))
+
+samp_list_30 <- get_sample_list(rz_sing_data)
+
+match_ids <- rownames(samp_list_30[[7]])
+addcovar_sub <- addcovar[match_ids, ,drop=FALSE]
+
+sub_blups_30 <- scan1blup(genoprobs = genoprobs[,10],
+                            pheno = samp_list_30[[7]],
+                            kinship = K[[10]],
+                            addcovar = addcovar_sub,
+                            cores = 10) 
+
+big_nested_iterations[[30]][[7]]$blups$blups <- sub_blups_30
+
+# for the 31st replicate
+set.seed(as.numeric(seeds[31]))
+
+samp_list_31 <- get_sample_list(rz_sing_data)
+
+match_ids <- rownames(samp_list_31[[7]])
+addcovar_sub <- addcovar[match_ids, ,drop=FALSE]
+
+sub_blups_31 <- scan1blup(genoprobs = genoprobs[,10],
+                            pheno = samp_list_31[[7]],
+                            kinship = K[[10]],
+                            addcovar = addcovar_sub,
+                            cores = 10) 
+
+big_nested_iterations[[31]][[7]]$blups$blups <- sub_blups_31
+
+# for the 33rd replicate
+set.seed(as.numeric(seeds[33]))
+
+samp_list_33 <- get_sample_list(rz_sing_data)
+
+match_ids <- rownames(samp_list_33[[7]])
+addcovar_sub <- addcovar[match_ids, ,drop=FALSE]
+
+sub_blups_33 <- scan1blup(genoprobs = genoprobs[,10],
+                            pheno = samp_list_33[[7]],
+                            kinship = K[[10]],
+                            addcovar = addcovar_sub,
+                            cores = 10) 
+
+big_nested_iterations[[33]][[7]]$blups$blups <- sub_blups_33
+
+# for the 34th replicate
+set.seed(as.numeric(seeds[34]))
+
+samp_list_34 <- get_sample_list(rz_sing_data)
+
+match_ids <- rownames(samp_list_34[[7]])
+addcovar_sub <- addcovar[match_ids, ,drop=FALSE]
+
+sub_blups_34 <- scan1blup(genoprobs = genoprobs[,10],
+                            pheno = samp_list_34[[7]],
+                            kinship = K[[10]],
+                            addcovar = addcovar_sub,
+                            cores = 10) 
+
+big_nested_iterations[[34]][[7]]$blups$blups <- sub_blups_34
+
+# for the 36th replicate
+set.seed(as.numeric(seeds[36]))
+
+samp_list_36 <- get_sample_list(rz_sing_data)
+
+match_ids <- rownames(samp_list_36[[7]])
+addcovar_sub <- addcovar[match_ids, ,drop=FALSE]
+
+sub_blups_36 <- scan1blup(genoprobs = genoprobs[,10],
+                            pheno = samp_list_36[[7]],
+                            kinship = K[[10]],
+                            addcovar = addcovar_sub,
+                            cores = 10) 
+
+big_nested_iterations[[36]][[7]]$blups$blups <- sub_blups_36
+
+# for the 39th replicate
+set.seed(as.numeric(seeds[39]))
+
+samp_list_39 <- get_sample_list(rz_sing_data)
+
+match_ids <- rownames(samp_list_39[[7]])
+addcovar_sub <- addcovar[match_ids, ,drop=FALSE]
+
+sub_blups_39 <- scan1blup(genoprobs = genoprobs[,10],
+                            pheno = samp_list_39[[7]],
+                            kinship = K[[10]],
+                            addcovar = addcovar_sub,
+                            cores = 10) 
+
+big_nested_iterations[[39]][[7]]$blups$blups <- sub_blups_39
+
+# for the 39th replicate, 200 samples
+set.seed(as.numeric(seeds[39]))
+
+samp_list_39_2 <- get_sample_list(rz_sing_data)
+
+match_ids <- rownames(samp_list_39_2[[4]])
+addcovar_sub <- addcovar[match_ids, ,drop=FALSE]
+
+sub_blups_39_2 <- scan1blup(genoprobs = genoprobs[,10],
+                            pheno = samp_list_39_2[[4]],
+                            kinship = K[[10]],
+                            addcovar = addcovar_sub,
+                            cores = 10) 
+
+big_nested_iterations[[39]][[4]]$blups$blups <- sub_blups_39_2
+
+# for the 42nd replicate
+set.seed(as.numeric(seeds[42]))
+
+samp_list_42 <- get_sample_list(rz_sing_data)
+
+match_ids <- rownames(samp_list_42[[7]])
+addcovar_sub <- addcovar[match_ids, ,drop=FALSE]
+
+sub_blups_42 <- scan1blup(genoprobs = genoprobs[,10],
+                            pheno = samp_list_42[[7]],
+                            kinship = K[[10]],
+                            addcovar = addcovar_sub,
+                            cores = 10) 
+
+big_nested_iterations[[42]][[7]]$blups$blups <- sub_blups_42
+
+# for the 44th replicate
+set.seed(as.numeric(seeds[44]))
+
+samp_list_44 <- get_sample_list(rz_sing_data)
+
+match_ids <- rownames(samp_list_44[[2]])
+addcovar_sub <- addcovar[match_ids, ,drop=FALSE]
+
+sub_blups_44 <- scan1blup(genoprobs = genoprobs[,10],
+                            pheno = samp_list_44[[2]],
+                            kinship = K[[10]],
+                            addcovar = addcovar_sub,
+                            cores = 10) 
+
+big_nested_iterations[[44]][[2]]$blups$blups <- sub_blups_44
+
+# for the 45th replicate
+set.seed(as.numeric(seeds[45]))
+
+samp_list_45 <- get_sample_list(rz_sing_data)
+
+match_ids <- rownames(samp_list_45[[7]])
+addcovar_sub <- addcovar[match_ids, ,drop=FALSE]
+
+sub_blups_45 <- scan1blup(genoprobs = genoprobs[,10],
+                            pheno = samp_list_45[[7]],
+                            kinship = K[[10]],
+                            addcovar = addcovar_sub,
+                            cores = 10) 
+
+big_nested_iterations[[45]][[7]]$blups$blups <- sub_blups_45
+
+# for the 48th replicate
+set.seed(as.numeric(seeds[48]))
+
+samp_list_48 <- get_sample_list(rz_sing_data)
+
+match_ids <- rownames(samp_list_48[[7]])
+addcovar_sub <- addcovar[match_ids, ,drop=FALSE]
+
+sub_blups_48 <- scan1blup(genoprobs = genoprobs[,10],
+                            pheno = samp_list_48[[7]],
+                            kinship = K[[10]],
+                            addcovar = addcovar_sub,
+                            cores = 10) 
+
+big_nested_iterations[[48]][[7]]$blups$blups <- sub_blups_48
+```
+
+```{r}
+#| cache: true
+#| label: Update the correlation matrix
+#| message: false
+
+sub_blups_2_qtl <- sub_blups_2[which(rownames(sub_blups_2) == "UNC18956869"), 1:8]
+temp_mat <- cbind(full_qtl_blups, sub_blups_2_qtl)
+result_p <- rcorr(temp_mat)
+corr_val_p <- result_p$r[1,2]
+corr_mat_p[2,7] <- corr_val_p
+result_s <- rcorr(temp_mat, type = "spearman")
+corr_val_s <- result_s$r[1,2]
+corr_mat_s[2,7] <- corr_val_s
+
+sub_blups_4_qtl <- sub_blups_4[which(rownames(sub_blups_4) == "UNC18956869"), 1:8]
+temp_mat <- cbind(full_qtl_blups, sub_blups_4_qtl)
+result_p <- rcorr(temp_mat)
+corr_val_p <- result_p$r[1,2]
+corr_mat_p[4,4] <- corr_val_p
+result_s <- rcorr(temp_mat, type = "spearman")
+corr_val_s <- result_s$r[1,2]
+corr_mat_s[4,4] <- corr_val_s
+
+sub_blups_8_qtl <- sub_blups_8[which(rownames(sub_blups_8) == "UNC18956869"), 1:8]
+temp_mat <- cbind(full_qtl_blups, sub_blups_8_qtl)
+result_p <- rcorr(temp_mat)
+corr_val_p <- result_p$r[1,2]
+corr_mat_p[8,7] <- corr_val_p
+result_s <- rcorr(temp_mat, type = "spearman")
+corr_val_s <- result_s$r[1,2]
+corr_mat_s[8,7] <- corr_val_s
+
+sub_blups_10_qtl <- sub_blups_10[which(rownames(sub_blups_10) == "UNC18956869"), 1:8]
+temp_mat <- cbind(full_qtl_blups, sub_blups_10_qtl)
+result_p <- rcorr(temp_mat)
+corr_val_p <- result_p$r[1,2]
+corr_mat_p[10,7] <- corr_val_p
+result_s <- rcorr(temp_mat, type = "spearman")
+corr_val_s <- result_s$r[1,2]
+corr_mat_s[10,7] <- corr_val_s
+
+sub_blups_11_qtl <- sub_blups_11[which(rownames(sub_blups_11) == "UNC18956869"), 1:8]
+temp_mat <- cbind(full_qtl_blups, sub_blups_11_qtl)
+result_p <- rcorr(temp_mat)
+corr_val_p <- result_p$r[1,2]
+corr_mat_p[11,7] <- corr_val_p
+result_s <- rcorr(temp_mat, type = "spearman")
+corr_val_s <- result_s$r[1,2]
+corr_mat_s[11,7] <- corr_val_s
+
+sub_blups_16_qtl <- sub_blups_16[which(rownames(sub_blups_16) == "UNC18956869"), 1:8]
+temp_mat <- cbind(full_qtl_blups, sub_blups_16_qtl)
+result_p <- rcorr(temp_mat)
+corr_val_p <- result_p$r[1,2]
+corr_mat_p[16,7] <- corr_val_p
+result_s <- rcorr(temp_mat, type = "spearman")
+corr_val_s <- result_s$r[1,2]
+corr_mat_s[16,7] <- corr_val_s
+
+sub_blups_17_qtl <- sub_blups_17[which(rownames(sub_blups_17) == "UNC18956869"), 1:8]
+temp_mat <- cbind(full_qtl_blups, sub_blups_17_qtl)
+result_p <- rcorr(temp_mat)
+corr_val_p <- result_p$r[1,2]
+corr_mat_p[17,7] <- corr_val_p
+result_s <- rcorr(temp_mat, type = "spearman")
+corr_val_s <- result_s$r[1,2]
+corr_mat_s[17,7] <- corr_val_s
+
+sub_blups_18_qtl <- sub_blups_18[which(rownames(sub_blups_18) == "UNC18956869"), 1:8]
+temp_mat <- cbind(full_qtl_blups, sub_blups_18_qtl)
+result_p <- rcorr(temp_mat)
+corr_val_p <- result_p$r[1,2]
+corr_mat_p[18,7] <- corr_val_p
+result_s <- rcorr(temp_mat, type = "spearman")
+corr_val_s <- result_s$r[1,2]
+corr_mat_s[18,7] <- corr_val_s
+
+sub_blups_22_qtl <- sub_blups_22[which(rownames(sub_blups_22) == "UNC18956869"), 1:8]
+temp_mat <- cbind(full_qtl_blups, sub_blups_22_qtl)
+result_p <- rcorr(temp_mat)
+corr_val_p <- result_p$r[1,2]
+corr_mat_p[22,7] <- corr_val_p
+result_s <- rcorr(temp_mat, type = "spearman")
+corr_val_s <- result_s$r[1,2]
+corr_mat_s[22,7] <- corr_val_s
+
+sub_blups_23_qtl <- sub_blups_23[which(rownames(sub_blups_23) == "UNC18956869"), 1:8]
+temp_mat <- cbind(full_qtl_blups, sub_blups_23_qtl)
+result_p <- rcorr(temp_mat)
+corr_val_p <- result_p$r[1,2]
+corr_mat_p[23,7] <- corr_val_p
+result_s <- rcorr(temp_mat, type = "spearman")
+corr_val_s <- result_s$r[1,2]
+corr_mat_s[23,7] <- corr_val_s
+
+sub_blups_24_qtl <- sub_blups_24[which(rownames(sub_blups_24) == "UNC18956869"), 1:8]
+temp_mat <- cbind(full_qtl_blups, sub_blups_24_qtl)
+result_p <- rcorr(temp_mat)
+corr_val_p <- result_p$r[1,2]
+corr_mat_p[24,2] <- corr_val_p
+result_s <- rcorr(temp_mat, type = "spearman")
+corr_val_s <- result_s$r[1,2]
+corr_mat_s[24,2] <- corr_val_s
+
+sub_blups_25_qtl <- sub_blups_25[which(rownames(sub_blups_25) == "UNC18956869"), 1:8]
+temp_mat <- cbind(full_qtl_blups, sub_blups_25_qtl)
+result_p <- rcorr(temp_mat)
+corr_val_p <- result_p$r[1,2]
+corr_mat_p[25,7] <- corr_val_p
+result_s <- rcorr(temp_mat, type = "spearman")
+corr_val_s <- result_s$r[1,2]
+corr_mat_s[25,7] <- corr_val_s
+
+sub_blups_26_qtl <- sub_blups_26[which(rownames(sub_blups_26) == "UNC18956869"), 1:8]
+temp_mat <- cbind(full_qtl_blups, sub_blups_26_qtl)
+result_p <- rcorr(temp_mat)
+corr_val_p <- result_p$r[1,2]
+corr_mat_p[26,7] <- corr_val_p
+result_s <- rcorr(temp_mat, type = "spearman")
+corr_val_s <- result_s$r[1,2]
+corr_mat_s[26,7] <- corr_val_s
+
+sub_blups_27_qtl <- sub_blups_27[which(rownames(sub_blups_27) == "UNC18956869"), 1:8]
+temp_mat <- cbind(full_qtl_blups, sub_blups_27_qtl)
+result_p <- rcorr(temp_mat)
+corr_val_p <- result_p$r[1,2]
+corr_mat_p[27,7] <- corr_val_p
+result_s <- rcorr(temp_mat, type = "spearman")
+corr_val_s <- result_s$r[1,2]
+corr_mat_s[27,7] <- corr_val_s
+
+sub_blups_28_qtl <- sub_blups_28[which(rownames(sub_blups_28) == "UNC18956869"), 1:8]
+temp_mat <- cbind(full_qtl_blups, sub_blups_28_qtl)
+result_p <- rcorr(temp_mat)
+corr_val_p <- result_p$r[1,2]
+corr_mat_p[28,7] <- corr_val_p
+result_s <- rcorr(temp_mat, type = "spearman")
+corr_val_s <- result_s$r[1,2]
+corr_mat_s[28,7] <- corr_val_s
+
+sub_blups_30_qtl <- sub_blups_30[which(rownames(sub_blups_30) == "UNC18956869"), 1:8]
+temp_mat <- cbind(full_qtl_blups, sub_blups_30_qtl)
+result_p <- rcorr(temp_mat)
+corr_val_p <- result_p$r[1,2]
+corr_mat_p[30,7] <- corr_val_p
+result_s <- rcorr(temp_mat, type = "spearman")
+corr_val_s <- result_s$r[1,2]
+corr_mat_s[30,7] <- corr_val_s
+
+sub_blups_31_qtl <- sub_blups_31[which(rownames(sub_blups_31) == "UNC18956869"), 1:8]
+temp_mat <- cbind(full_qtl_blups, sub_blups_31_qtl)
+result_p <- rcorr(temp_mat)
+corr_val_p <- result_p$r[1,2]
+corr_mat_p[31,7] <- corr_val_p
+result_s <- rcorr(temp_mat, type = "spearman")
+corr_val_s <- result_s$r[1,2]
+corr_mat_s[31,7] <- corr_val_s
+
+sub_blups_33_qtl <- sub_blups_33[which(rownames(sub_blups_33) == "UNC18956869"), 1:8]
+temp_mat <- cbind(full_qtl_blups, sub_blups_33_qtl)
+result_p <- rcorr(temp_mat)
+corr_val_p <- result_p$r[1,2]
+corr_mat_p[33,7] <- corr_val_p
+result_s <- rcorr(temp_mat, type = "spearman")
+corr_val_s <- result_s$r[1,2]
+corr_mat_s[33,7] <- corr_val_s
+
+sub_blups_34_qtl <- sub_blups_34[which(rownames(sub_blups_34) == "UNC18956869"), 1:8]
+temp_mat <- cbind(full_qtl_blups, sub_blups_34_qtl)
+result_p <- rcorr(temp_mat)
+corr_val_p <- result_p$r[1,2]
+corr_mat_p[34,7] <- corr_val_p
+result_s <- rcorr(temp_mat, type = "spearman")
+corr_val_s <- result_s$r[1,2]
+corr_mat_s[34,7] <- corr_val_s
+
+sub_blups_36_qtl <- sub_blups_36[which(rownames(sub_blups_36) == "UNC18956869"), 1:8]
+temp_mat <- cbind(full_qtl_blups, sub_blups_36_qtl)
+result_p <- rcorr(temp_mat)
+corr_val_p <- result_p$r[1,2]
+corr_mat_p[36,7] <- corr_val_p
+result_s <- rcorr(temp_mat, type = "spearman")
+corr_val_s <- result_s$r[1,2]
+corr_mat_s[36,7] <- corr_val_s
+
+sub_blups_39_qtl <- sub_blups_39[which(rownames(sub_blups_39) == "UNC18956869"), 1:8]
+temp_mat <- cbind(full_qtl_blups, sub_blups_39_qtl)
+result_p <- rcorr(temp_mat)
+corr_val_p <- result_p$r[1,2]
+corr_mat_p[39,7] <- corr_val_p
+result_s <- rcorr(temp_mat, type = "spearman")
+corr_val_s <- result_s$r[1,2]
+corr_mat_s[39,7] <- corr_val_s
+
+sub_blups_39_qtl_2 <- sub_blups_39_2[which(rownames(sub_blups_39_2) == "UNC18956869"), 1:8]
+temp_mat <- cbind(full_qtl_blups, sub_blups_39_qtl_2)
+result_p <- rcorr(temp_mat)
+corr_val_p <- result_p$r[1,2]
+corr_mat_p[39,4] <- corr_val_p
+result_s <- rcorr(temp_mat, type = "spearman")
+corr_val_s <- result_s$r[1,2]
+corr_mat_s[39,4] <- corr_val_s
+
+sub_blups_42_qtl <- sub_blups_42[which(rownames(sub_blups_42) == "UNC18956869"), 1:8]
+temp_mat <- cbind(full_qtl_blups, sub_blups_42_qtl)
+result_p <- rcorr(temp_mat)
+corr_val_p <- result_p$r[1,2]
+corr_mat_p[42,7] <- corr_val_p
+result_s <- rcorr(temp_mat, type = "spearman")
+corr_val_s <- result_s$r[1,2]
+corr_mat_s[42,7] <- corr_val_s
+
+sub_blups_44_qtl <- sub_blups_44[which(rownames(sub_blups_44) == "UNC18956869"), 1:8]
+temp_mat <- cbind(full_qtl_blups, sub_blups_44_qtl)
+result_p <- rcorr(temp_mat)
+corr_val_p <- result_p$r[1,2]
+corr_mat_p[44,2] <- corr_val_p
+result_s <- rcorr(temp_mat, type = "spearman")
+corr_val_s <- result_s$r[1,2]
+corr_mat_s[44,2] <- corr_val_s
+
+sub_blups_45_qtl <- sub_blups_45[which(rownames(sub_blups_45) == "UNC18956869"), 1:8]
+temp_mat <- cbind(full_qtl_blups, sub_blups_45_qtl)
+result_p <- rcorr(temp_mat)
+corr_val_p <- result_p$r[1,2]
+corr_mat_p[45,7] <- corr_val_p
+result_s <- rcorr(temp_mat, type = "spearman")
+corr_val_s <- result_s$r[1,2]
+corr_mat_s[45,7] <- corr_val_s
+
+sub_blups_48_qtl <- sub_blups_48[which(rownames(sub_blups_48) == "UNC18956869"), 1:8]
+temp_mat <- cbind(full_qtl_blups, sub_blups_48_qtl)
+result_p <- rcorr(temp_mat)
+corr_val_p <- result_p$r[1,2]
+corr_mat_p[48,7] <- corr_val_p
+result_s <- rcorr(temp_mat, type = "spearman")
+corr_val_s <- result_s$r[1,2]
+corr_mat_s[48,7] <- corr_val_s
+
+colnames(corr_mat_p) <- c("350", "300", "250", "200", "150", "100", "50")
+colnames(corr_mat_s) <- c("350", "300", "250", "200", "150", "100", "50")
+```
+
+```{r, fig.height = 6}
+#| cache: true
+#| label: correlation heatmaps
+#| message: false
+
+big_corr_mat_p <- data.frame(sample_size = integer(), iteration = integer(), corr_val = numeric())
+big_corr_mat_s <- data.frame(sample_size = integer(), iteration = integer(), corr_val = numeric())
+
+for (i in 1:50) {
+  for (j in 1:7) {
+    sample_size <- as.numeric(colnames(corr_mat_p)[j])
+    iteration <- as.numeric(rownames(corr_mat_p)[i])
+    corr_val_p <- corr_mat_p[i,j]
+    corr_val_s <- corr_mat_s[i,j]
+    
+    p_row <- data.frame(sample_size = sample_size, iteration = iteration, corr_val = corr_val_p)
+    s_row <- data.frame(sample_size = sample_size, iteration = iteration, corr_val = corr_val_s)
+    
+    big_corr_mat_p <- rbind(big_corr_mat_p, p_row)
+    big_corr_mat_s <- rbind(big_corr_mat_s, s_row)
+  }
+}
+
+big_corr_mat_p <- big_corr_mat_p |> mutate(norm_corr_val = (corr_val - min(corr_val)) / (max(corr_val) - min(corr_val)))
+big_corr_mat_s <- big_corr_mat_s |> mutate(norm_corr_val = (corr_val - min(corr_val)) / (max(corr_val) - min(corr_val)))
+
+ggplot(big_corr_mat_p, aes(x = as.factor(sample_size), y = as.factor(iteration), fill = norm_corr_val)) +
+  geom_tile(color = "black") +
+  theme_minimal() +
+  guides(fill = guide_colourbar(barwidth = 2, barheight = 15, title = "Correlation")) +
+  labs(x = "Sample Size", y = "Iteration", title = "Pearson") +
+  scale_fill_gradientn(colors = hcl.colors(10, "inferno")) +
+  coord_fixed(ratio = 1/8)
+
+```
+
+# Spearman
+Here, we compute the Spearman correlations and plot them as a heatmap.
+```{r, fig.height = 6}
+ggplot(big_corr_mat_s, aes(x = as.factor(sample_size), y = as.factor(iteration), fill = norm_corr_val)) +
+  geom_tile(color = "black") +
+  theme_minimal() +
+  guides(fill = guide_colourbar(barwidth = 2, barheight = 15, title = "Correlation")) +
+  labs(x = "Sample Size", y = "Iteration", title = "Spearman") +
+  scale_fill_gradientn(colors = hcl.colors(10, "inferno")) +
+  coord_fixed(ratio = 1/8)
+```
+
+# Beeswarm
+Next, we display the Pearson and Spearman correlations as a beeswarm plot.
+```{r}
+#| cache: true
+#| label: Correlation beeswarm
+#| message: false
+
+big_corr_mat <- data.frame(sample_size = integer(), iteration = integer(), corr_val = numeric(), corr_type = character())
+
+for (i in 1:30) {
+  for (j in 1:7) {
+    sample_size <- as.numeric(colnames(corr_mat_p)[j])
+    iteration <- as.numeric(rownames(corr_mat_p)[i])
+    corr_val_p <- corr_mat_p[i,j]
+    corr_val_s <- corr_mat_s[i,j]
+    
+    p_row <- data.frame(sample_size = sample_size, iteration = iteration, corr_val = corr_val_p, corr_type = "Pearson")
+    s_row <- data.frame(sample_size = sample_size, iteration = iteration, corr_val = corr_val_s, corr_type = "Spearman")
+    
+    big_corr_mat <- rbind(big_corr_mat, p_row, s_row)
+  }
+}
+
+ggplot(big_corr_mat, aes(x = sample_size, y = corr_val, color = corr_type)) +
+  geom_beeswarm(cex = 2.5) +
+  theme(panel.background = element_rect(fill = "gray95")) +
+  labs(x = "Sample Size", y = "Correlation", color = "Correlation Type") +
+  scale_color_manual(values = c("Pearson" = "cornflowerblue", "Spearman" = "brown3"))
+```
+
+# Ridgeline
+Finally, we plot the Pearson and Spearman correlations as a ridgeline plot.
+```{r}
+#| cache: true
+#| label: correlation ridge line
+#| message: false
+
+ggplot(big_corr_mat, aes(x=corr_val, y = as.factor(sample_size), fill = corr_type)) +
+  geom_density_ridges(alpha = 0.4) + 
+  labs(x = "Correlation", y = "Sample Size", color = "Correlation Type") +
+  theme(panel.background = element_rect(fill = "gray95")) +
+  scale_fill_manual(values = c("Pearson" = "cornflowerblue", "Spearman" = "brown3"))
+
+```
+From these results, we can see that the Spearman correlation is much lower across sample sizes than the Pearson correlation. This indicates that there is a strong linear correlation between the founder effects at the true peak of each sample size-iteration pair and those of the full dataset. Also, the ridgeline plot indicates that as sample size decreases, the distribution of both sets of correlation values widens, with the Spearman distributions almost flattening.
+
+:::
+
+# Radar
+Here, we look at how the BLUPs vary across sample size. We average the BLUPs for each founder (A-H) at each sample size and create a radar plot for each sample size. The line represents the average BLUPs for the sample size, while the shaded region represents the standard deviation.
+```{r}
+#| cache: true
+#| label: Radar chart for blups
+#| message: false
+#| warning: false
+
+big_blups <- data.frame(iteration = integer(), sample_size = integer(), A = numeric(), B = numeric(), C = numeric(), D = numeric(), E = numeric(), F = numeric(), G = numeric(), H = numeric())
+
+for (i in 1:30) {
+  for (j in 1:7) {
+
+    
+    sample_size <- big_nested_iterations[[i]][[j]]$peaks$sample_size
+    
+    current_sub_blups <- big_nested_iterations[[i]][[j]]$blups$blups
+    
+    current_sub_qtl_blups <- current_sub_blups[which(rownames(current_sub_blups) == "UNC18956869"), 1:8]
+    
+    A <- current_sub_qtl_blups[1]
+    B <- current_sub_qtl_blups[2]
+    C <- current_sub_qtl_blups[3]
+    D <- current_sub_qtl_blups[4]
+    E <- current_sub_qtl_blups[5]
+    F <- current_sub_qtl_blups[6]
+    G <- current_sub_qtl_blups[7]
+    H <- current_sub_qtl_blups[8]
+    
+    blup_sum <- data.frame(iteration = i, sample_size = sample_size, A = A, B = B, C = C, D = D, E = E, F = F, G = G, H = H)
+    
+    big_blups <- rbind(big_blups, blup_sum)
+  }
+}
+
+average_blups <- big_blups |>
+  group_by(sample_size) |> 
+  summarise(
+    A_mean = mean(A),
+    A_sd = sd(A),
+    B_mean = mean(B),
+    B_sd = sd(B),
+    C_mean = mean(C),
+    C_sd = sd(C),
+    D_mean = mean(D),
+    D_sd = sd(D),
+    E_mean = mean(E),
+    E_sd = sd(E),
+    F_mean = mean(F),
+    F_sd = sd(F),
+    G_mean = mean(G),
+    G_sd = sd(G),
+    H_mean = mean(H),
+    H_sd = sd(H),
+  )
+
+traits <- LETTERS[1:8]
+
+# Create a list of plots, one for each sample size
+plots <- list()
+
+for(i in 1:nrow(average_blups)) {
+  row <- average_blups[i, ]
+  means <- as.numeric(row[paste0(traits, "_mean")])
+  sds <- as.numeric(row[paste0(traits, "_sd")])
+  upper <- means + sds
+  lower <- means - sds
+  
+  means <- c(means, means[1])
+  upper <- c(upper, upper[1])
+  lower <- c(lower, lower[1])
+  theta <- c(traits, traits[1])
+  
+  plots[[length(plots) + 1]] <- list(
+    type = 'scatterpolar',
+    r = lower, 
+    theta = theta,
+    fill = 'toself',
+    line = list(color = 'white'),
+    showlegend = FALSE,
+    visible =i == 1
+  )
+  
+  plots[[length(plots) + 1]] <- list(
+    type = 'scatterpolar',
+    r = upper, 
+    theta = theta,
+    fill = 'tonext',
+    fillcolor = 'rgba(0, 100, 200, 0.3)',
+    line = list(color = 'white'),
+    showlegend = FALSE,
+    visible =i == 1
+  )
+  
+  plots[[length(plots) + 1]] <- list(
+    type = 'scatterpolar',
+    r = means, 
+    theta = theta,
+    mode = 'lines+markers',
+    name = paste("Sample Size", row$sample_size),
+    visible =i == 1
+  )
+}
+
+steps <- lapply(1:(nrow(average_blups)), function(i) {
+  vis <- rep(FALSE, length(plots))
+  vis[((i-1)*3 + 1):((i-1)*3 + 3)] <- TRUE
+  list(method = "update", args = list(list(visible = vis)), label = average_blups$sample_size[i])
+})
+
+fig <- plot_ly(type = "scatterpolar")
+fig <- fig |> layout(xaxis = NULL, yaxis = NULL)
+fig$x$data <- plots
+
+fig <- fig |> 
+  layout(
+    polar = list(
+      domain = list(x = c(0, 1), y = c(0, 1)),
+      bgcolor = 'white',
+      radialaxis = list(
+        visible = TRUE,
+        range = c(-2, 3),
+        showticklabels = TRUE,
+        ticks = '',
+        showline = TRUE,
+        showgrid = TRUE
+      ),
+      angularaxis = list(
+        showticklabels = TRUE,
+        ticks = '',
+        showline = TRUE,
+        showgrid = TRUE
+      )
+    ),
+    paper_bgcolor = 'white',
+    plot_bgcolor = 'white', 
+    updatemenus = list(
+    list(
+    type = "buttons",
+    direction = "right",
+    x = 0.1,
+    y = -0.1,
+    buttons = steps)), 
+    title = "Radar Chart with Shaded Error"
+  )
+
+
+fig
+
+```
+We can see that the average BLUPs change very little as we decrease sample size, indicating that NOD has the strongest effect across sample sizes, while the shaded standard deviation region shrinks with increasing sample size.
+
+:::
+
+## Heritability and Percent Variance Explained
+Next, we see how the heritability and percent variance explained (PVE) vary across sample sizes. The heritability is calculated using the est_herit function from qtl2, and the percent variance explained is calculated using the equation $PVE = 1 - 10^{\left(-\frac{2}{n} \cdot LOD\right)}$.
+
+::: {.panel-tabset .nav-pills}
+
+# Heritability 
+The est_herit function fro qtl2 estimates the heritability of a set of traits using a linear mixed model and allows for covariates. Here, we estimate the heritability of the single UNK_9.698_1251.79456_minus trait using covariates sex, wave, and batch.
+
+::: {.panel-tabset .nav-pills}
+
+# Iterations
+First, we show how the heritability varies by sample size within each nested subset. The horizontal black line is the heritability calculated using the full dataset.
+```{r}
+#| cache: true
+#| label: heritability
+
+big_herits <- data.frame(sample_size = numeric(), iteration = integer(), herit = numeric())
+
+for (i in 1:50) {
+  for (j in 1:7) {
+    herit <- big_nested_iterations[[i]][[j]]$herit[1]
+    sample_size <- as.numeric(names(big_nested_iterations[[i]])[j])
+    
+    herit_row <- data.frame(sample_size = sample_size, iteration = i, herit = herit)
+    
+    big_herits <- rbind(big_herits, herit_row)
+  }
+}
+
+big_herits$iteration <- as.factor(big_herits$iteration)
+
+big_herits |>
+  ggplot( aes(x=sample_size, y = herit, group=iteration, color=iteration)) +
+  geom_line() +
+  geom_point() + 
+  scale_x_continuous(name = "Sample Size", breaks = seq(50, 350, by = 50)) +
+  scale_y_continuous(name = "Heritability", breaks = seq(0, 1, by = 0.1)) +
+  scale_color_manual(values = mypal) +
+  theme(panel.background = element_rect(fill = "gray95")) +
+  geom_hline(yintercept = sing_lip_herit, color = "black", linetype = "solid", size = 1)
+
+```
+We can see that all of the 350 sample subsets have heritabilities around 0.7 or 0.8. Then, as the sample size decreases, the distribution of heritabilities gets wider, and by the 100 sample subsets, the heritabilities range from 0 to 1.
+
+# Boxplot
+Next, we show the same inforamtion as above but as a boxplot.
+```{r}
+ggplot(big_herits, aes(x = as.factor(sample_size), y = herit, color = as.factor(sample_size))) +
+  geom_boxplot(outlier.shape = NA) +
+  scale_color_brewer(palette = "Set3") +
+  geom_jitter() + 
+  theme(panel.background = element_rect(fill = "gray95")) + 
+  labs(x = "Sample Size", y = "Heritability", color = "Sample Size") + 
+  geom_hline(yintercept = sing_lip_herit, color = "black", linetype = "solid")
+```
+From the boxplots, we can see how the range of heritabilities widens with sample size. Additionally, the average heritability tends to decrease with decreasing sample size. We know that lower sample sizes have lower statistical power, which explains the widening distributions and the lower average heritabilities.
+:::
+
+# Percent variance explained
+The PVE formula shown above gives the percentage of variance in a trait explained by a given QTL, and it relies on both LOD and sample size. We would expect the PVE to decrease with decreasing sample size. 
+
+::: {.panel-tabset .nav-pills}
+
+# Iterations
+First, we look at the PVE for all sample size-iteration pairs grouped by nested subset. The horizontal line is the PVE value calucated using the full dataset.
+```{r}
+#| cache: true
+#| label: Percent value explained
+
+lod_pve <- data.frame(sample_size = integer(), iteration = integer(), lod = numeric(), pve = numeric())
+
+for (i in 1:50) {
+  for (j in 1:7) {
+    if (i == 4 & j == 4) {
+      lod = big_nested_iterations[[i]][[j]]$peaks$peaks$lod[2]
+    } else if ( i == 39 & j == 4) {
+      lod = big_nested_iterations[[i]][[j]]$peaks$peaks$lod[2]
+    } else if ( i == 44 & j == 2) {
+      lod = big_nested_iterations[[i]][[j]]$peaks$peaks$lod[2]
+    } else if ( i == 28 & j == 7) {
+      lod = big_nested_iterations[[i]][[j]]$peaks$peaks$lod[2]
+    } else {
+      lod = big_nested_iterations[[i]][[j]]$peaks$peaks$lod[1]
+    }
+    sample_size <- as.numeric(names(big_nested_iterations[[i]])[j])
+    pve = 1 - 10^((-2/sample_size)*lod)
+    
+    pve_row <- data.frame(sample_size = sample_size, iteration = i, lod = lod, pve = pve)
+    
+    lod_pve = rbind(lod_pve, pve_row)
+    
+  }
+}
+
+lod_pve$iteration <- as.factor(lod_pve$iteration)
+
+lod_pve |>
+  ggplot( aes(x=sample_size, y = pve, group=iteration, color=iteration)) +
+  geom_line() +
+  geom_point() + 
+  scale_x_continuous(name = "Sample Size", breaks = seq(50, 350, by = 50)) +
+  scale_y_continuous(name = "% Variance Explained", breaks = seq(0, 1, by = 0.1)) +
+  scale_color_manual(values = mypal) +
+  theme(panel.background = element_rect(fill = "gray95")) +
+  geom_hline(yintercept = sing_lip_pve, linetype = "solid", color = "black", size = 1)
+  
+```
+Similar to the heritabilities, we can see that the PVE starts with a narrow distribution at 350 samples, and the distribution widens as sample size decreases, as expected. However, when considering all iterations together, we can see that the PVE tends to increase as sample size decreases, which is unexpected.
+
+# Boxplot
+Now, we will look at the distributions of the above data in a boxplot.
+```{r}
+ggplot(lod_pve, aes(x = as.factor(sample_size), y = pve, color = as.factor(sample_size))) +
+  geom_boxplot(outlier.shape = NA) +
+  scale_color_brewer(palette = "Set3") +
+  geom_jitter() + 
+  theme(panel.background = element_rect(fill = "gray95")) + 
+  labs(x = "Sample Size", y = "% Variance Explained", color = "Sample Size") + 
+  geom_hline(yintercept = sing_lip_pve, color = "black", linetype = "solid")
+
+```
+Again, we can see that the distribution of PVE widens as sample size decreases, but the average PVE increases. This seems strange and wrong. What did the Gatti paper do??? The Keele paper does power vs. QTL effect size, so maybe we could do that? I think it will be easier and make more sense when we expand to multiple traits.
+
+# Variance
+This shows the variance in PVE at each sample size.
+```{r}
+var_pve <- lod_pve |>
+  group_by(sample_size) |> 
+  summarise(variance = var(pve))
+
+ggplot(var_pve, aes(x = sample_size, y = variance)) +
+  geom_point(size = 3) + 
+  labs(x = "Sample Size", y = "Variance", title = "Variance in % Variance Explained") +
+  theme(panel.background = element_rect(fill = "gray95"))
+```
+Like we saw in the box plot, decreasing sample size leads to more variance in the PVE.
+:::
+
+# Heritability vs. PVE
+Next, we look at a scatter plot of the heritability vs. PVE. In the [Broman QTL mapping book](https://rqtl.org/book/rqtlbook_ch04.pdf), it says that the proportion of phenotypic variance explained by a QTL is the estimated heritability due to the QTL, so I thought this scatter plot could be interesting. Here, the black point is the heritability and PVE of the full dataset.
+```{r}
+#| cache: true
+#| label: Heritability vs. PVE
+
+herit_pve <- cbind(big_herits, lod_pve$pve)
+colnames(herit_pve)[4] <- "pve"
+
+herit_pve$sample_size <- as.factor(herit_pve$sample_size)
+
+ggplot(herit_pve, aes(x = herit, y = pve, color = sample_size)) +
+  geom_point(size = 5, alpha = 1) +
+  scale_color_brewer(palette = "Set3") + 
+  geom_point(x = sing_lip_herit, y = sing_lip_pve, size = 5, color = "black") + 
+  theme(panel.background = element_rect(fill = "gray95")) +
+  labs(x = "Heritability", y = "% Variance Explained", color = "Sample Size")
+
+```
+From this, we can see that as sample size decreases, the heritability and PVE both expand around the "true" heritability and PVE value. However, there is no clear relationship between PVE and heritability seen here, even though it seems like there should be.
+
+:::
+
+## Accuracy
+Finally, we will look at the accuracy of recalling the true peak across sample sizes. Since power decreases with decreasing sample size, we expect to see less accuracy in recalling the peak.
+
+::: {.panel-tabset .nav-pills}
+
+# Confusion matrix
+First, we will check the confusion matrix. We used a tolerance of 5 Mb as a threshold for detection of the true peak.
+```{r}
+#| cache: true
+#| label: PR curve for accuracy
+
+accuracy_df <- data.frame(sample_size = integer(), iteration = integer(), peaks_found = integer(), true_peak_found = logical(), distance = numeric(), score = numeric(), confidence = numeric())
+
+true_pos <- full_dataset_peaks$pos
+
+for (i in 1:50) {
+  for (j in 1:7) {
+    sample_size <- as.numeric(names(big_nested_iterations[[i]])[j])
+    true_peak_found <- big_nested_iterations[[i]][[j]]$peaks$peak_found
+    peaks_found <- length(big_nested_iterations[[i]][[j]]$peaks$peaks$pos)
+    correlation <- big_corr_mat_s$norm_corr_val[j + 7*(i-1)]
+    distance <- abs(big_nested_iterations[[i]][[j]]$peaks$peaks$pos - true_pos)
+    
+    if (!true_peak_found) {
+      score <- abs(3 - (peaks_found + correlation))
+    } else {
+      score <- abs(3 - (peaks_found + as.numeric(true_peak_found) + correlation + distance))
+    }
+    
+    for (k in 1:length(score)) {
+      if (score[k] == 0) {
+        confidence <- 1
+    } else {
+        confidence = 1/(1+score)
+    }
+      sum_row <- data.frame(sample_size = sample_size, 
+                          iteration = i, 
+                          peaks_found = peaks_found, 
+                          true_peak_found = true_peak_found,
+                          distance = distance,
+                          score = score[k],
+                          confidence = confidence)
+    }
+    
+    accuracy_df <- rbind(accuracy_df, sum_row)
+  }
+}
+
+tolerance <- 5
+accuracy_df$truth <- accuracy_df$distance <= tolerance
+
+for (i in 1:length(accuracy_df$truth)) {
+  if (is.na(accuracy_df$truth[i])) {
+    accuracy_df$truth[i] <- TRUE
+  }
+}
+
+confusionMatrix(
+  factor(accuracy_df$true_peak_found, levels=c(TRUE, FALSE)),
+  factor(accuracy_df$truth, levels = c(TRUE,FALSE))
+)
+```
+Here, we see that there were 331 true positives, 24 false positives (other peaks found besides the one on chromosome 10), and 19 false negatives (peak on chromosome 10 was not found). 
+
+# Power
+Ultimately, we want to know about how the sample size we use for the scans effects the mapping power. In the Gatti and Keele papers, they compute the power at a variety of QTL effect sizes, minor allele frequencies, polygenic backgrounds, and sample sizes. We can do this when we move to eQTL mapping and have more data. For now, I just computed the power for each sample size-iteration pair using the following transformation: 
+$$Power = \frac{1}{1 + \text{distance}}$$
+where distance is the absolute value of the position of the true peak minus the position of the predicted peak.
+
+::: {.panel-tabset .nav-pills}
+
+# Power vs. LOD
+First, we plot the power computed for each sample size-iteration pair vs. the max LOD of each sample size-iteration pair. 
+```{r}
+#| cache: true
+#| label: Power
+#| message: false
+
+power_df <- data.frame(sample_size = integer(), iteration = integer(), distance = numeric(), power = numeric(), pve = numeric(), lod = numeric())
+
+true_pos <- full_dataset_peaks$pos
+
+for (i in 1:50) {
+  for (j in 1:7) {
+    sample_size <- as.numeric(names(big_nested_iterations[[i]])[j])
+    pve <- herit_pve$pve[i*j]
+    distance <- abs(big_nested_iterations[[i]][[j]]$peaks$peaks$pos - true_pos)
+    
+    for (k in 1: length(distance)) {
+      if (is.na(distance[k])) {
+      power <- 0
+      } else {
+      power <- 1/(1+distance[k])
+      }
+    
+    lod <- big_nested_iterations[[i]][[j]]$peaks$peaks$lod[k]  
+    sum_row <- data.frame(sample_size = sample_size, iteration = i, distance = distance[k], power = power, pve = pve, lod = lod)
+    
+    power_df <- rbind(power_df, sum_row)
+    }
+  }
+}
+
+ggplot(power_df, aes(x = lod, y = power, color = as.factor(sample_size))) +
+  geom_point() +
+  geom_smooth(aes(group = 1), method = "loess", color = "black", se = FALSE) +
+  scale_color_brewer(palette = "Set3") +
+  labs(x = "LOD", y = "Power", color = "Sample Size") 
+
+```
+As we would expect, as the max LOD increases, so does the power. The LOD is an indicator of how strongly correlated the QTL is to the trait, so it makes sense that the higher LOD values give higher detection power. Note that some of the iterations of the higher sample sizes result in low power. These are the false positives, where the iterations identified a peak on a different chromosome. 
+
+# Boxplot
+Next, we will look at a boxplot of the power grouped my sample size.
+```{r}
+ggplot(power_df, aes(x = as.factor(sample_size), y = power, color = as.factor(sample_size))) +
+  geom_boxplot(outlier.shape = NA) +
+  scale_color_brewer(palette = "Set3") +
+  geom_jitter() + 
+  theme(panel.background = element_rect(fill = "gray95")) + 
+  labs(x = "Sample Size", y = "Power", color = "Sample Size") 
+
+```
+Just as above, decreasing sample size results in lower power and wider distributions, which is the same trend we saw for the other characteristics as well. Eventually, we want to plot power vs. PVE (Gatti) or power vs. QTL effect size (Keele) or something similar, but I don't think we can do that until we start using the expression data.
+:::
+:::
